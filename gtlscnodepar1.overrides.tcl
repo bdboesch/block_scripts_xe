@@ -1,7 +1,12 @@
-# ***NOTE***
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# NOTE
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Do not modify SVARs in this file. Rather, save SVAR modifications to this file:
 # <build>/scripts_build/conf/svar_values.tcl
  
+# Do not add app-options settings here, as this is sourced before the design is loaded. 
+# Instead define a post/pre hook somewhere for a subprocess that is common for most tasks.
+
 
 ## -----------------------------------------------------------------------------
 ##                           Block Override Script
@@ -54,7 +59,7 @@
 source  /p/nvlsd/gcdp192/build/scripts/nvlsd.gcdp192.rls_global_overrides.stcl
 
 ##Central XECORE oveeride
-source /nfs/site/disks/nvlp_infra_env_01/build/scripts/XECORE_CENTRAL/gtxecore_nvlp_central_overrides_jonTCON.stcl
+source $scriptDir/gtxecore_nvlp_central_overrides_jonTCON.stcl
 
 ##Recipe
 fcsyn::params regbank,user_exclude {
@@ -68,3 +73,14 @@ lscnodeunit1/u_lscnode_rsrc_alloc/*resources_avail_reg*
 }
 
 fcsyn::params duplicate_registers_regexp "lscnodeunit1/lscnodeunit_cgdis_xfer/cp_cgdis_pre_dft_reg:num_copies:20"
+
+# Deactivate 1.1v max scenario.
+opmanager::params opset,sifunctional_tttt_cmax_1p100v_1p100v_100c_tttt_100c_max,scenario.opt.active 0
+
+# Limit route_auto DR iterations and change GR effort to medium (high is runtime killer).
+route::params route_auto_dr_iterations 5
+route::params groute_effort medium
+
+# Limit the number of route eco iterations when fixing DRCs. This param set the app-option 
+# "route.detail.eco_max_number_of_iterations" during "scripts_process/p1278/modules/route.module".
+#route::params eco_snr_loops_default 15
