@@ -1,5 +1,12 @@
-
+echo "BDBOESCH-INFO: Sourcing script: [info script]"
 proc_time "CR_START"
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Globals
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+global scriptDir
+global in_gui_session
+
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Set references for needed scripts.
@@ -52,6 +59,11 @@ if {[core::query -is_batch_run]} {
 # Keep track of GUI status. Will close GUI at the end if not open already.
 set gui_status $in_gui_session
 
+# Make a directory to hold custom_reports.
+set custom_reports_dir "$build_workarea/custom_reports/$stage/$custom_rpt_scenario"
+file delete -force -- $custom_reports_dir
+file mkdir $custom_reports_dir
+
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Suppress unwanted messages.
@@ -95,16 +107,12 @@ if { $stage == "init_design" } {
    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
    # Prepare the reporting job.
    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-   set custom_reports_dir "$build_workarea/custom_reports/$stage/$custom_rpt_scenario"
-
    # Make directories to store images and reports.
    set images_dir                    "$custom_reports_dir/images"
    set logical_only_path_reports_dir "$custom_reports_dir/logical_only_paths"
    set paths_of_interest_dir         "$custom_reports_dir/paths_of_interest"
 
    # Remove any previous verions of the report directory before creating new reports.
-   file delete -force -- $custom_reports_dir
-   file mkdir $custom_reports_dir
    file mkdir $images_dir
    file mkdir $logical_only_path_reports_dir
    file mkdir $paths_of_interest_dir

@@ -55,10 +55,10 @@
 #     ...stuff...
 #}
 
-##Central Project override
-source  /p/nvlsd/gcdp192/build/scripts/nvlsd.gcdp192.rls_global_overrides.stcl
+#Central Project override
+source $scriptDir/PROC_TCON.io_at_40.stcl
 
-##Central XECORE oveeride
+#Central XECORE oveeride
 source $scriptDir/gtxecore_nvlp_central_overrides_jonTCON.stcl
 
 # Flow was erroring during prects_opt with DFT-FATAL.
