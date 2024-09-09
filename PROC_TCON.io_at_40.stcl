@@ -1,0 +1,712 @@
+#-------------------------------------------------------------------------------
+#  TCON AUTOMATION METHODLOGY.
+#     by bdinarte and contributions from kgujar, smittal4 and skalidos
+#
+#  Step1:   Create a project area:
+#
+#           /p/<PROJECT>/build/scripts/tcon_automation/ 
+#           ie:
+#           /p/dg2sd/build/scripts/tcon_automation/ 
+#
+#  Step2:
+#           Create description files for TCON Automation Script
+#           Load FC BlackBox ddc in dc_shell, set current_design as the top design and run the generator.tcl script
+#           Check generator.tcl for furhter details.
+#           Review results and output files with FC Floorplan Owner and STOs
+#
+#  Step3:
+#           Make sure PROC_TCON.stcl is sourced in partition.overrides.tcl files.
+#
+#           Visit http://goto/tcons
+#-------------------------------------------------------------------------------
+
+
+#-------------------------------------------------------------------------------
+#DEBUG: PROC_TCON -input_tcon_INTER 0.6 -output_tcon_INTER 0.6 -input_tcon_INTRA 0.5 -output_tcon_INTRA 0.5
+proc ::block::tcon {} {
+   if { [core::tool -icc2 -fc -dc] } {
+
+      set tcon_CMD "PROC_TCON \
+      -input_tcon_INTER  0.5   \
+      -output_tcon_INTER 0.5   \
+      -input_tcon_INTRA  0.4   \
+      -output_tcon_INTRA 0.4   \
+      "
+      if { [catch { [eval $tcon_CMD] } errors] } {
+         core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) Errors with main proc" 
+         echo "\n$errors\n"
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Running default_tcon_budgetting"
+         catch { default_tcon_budgetting }
+      }
+   }
+}
+
+#-------------------------------------------------------------------------------
+# Given a port, check if this port has a scon applied, if so proceed with scon
+# if not, apply tcon based on port hierarchy (intra secton or inter section)
+#-------------------------------------------------------------------------------
+proc PROC_TCON { args } {
+
+   # NOTE This was set in the rls_global_overrides.stcl file before sourcing their copy of PROC_TCON. 
+   # Adding here as well since I don't know what it does.
+   set ::tdb::params(enable,tdb) 0
+
+   #---> Global
+   variable port_status_hash {}
+   lappend port_status_hash [list SCENARIO TYPE PORT DIRECTION SCON TCON COMMENTs]
+
+   variable tcon_ports          {}
+   variable scon_ports          {}
+   variable dropped_ports       {}
+   variable defaulted_ports     {}
+
+   variable port_tcon_list   {}
+   variable zero_time_loop
+   set zero_time_loop [ clock seconds ]
+
+   variable violators_report_SCON
+   set violators_report_SCON  $::tdb::params(env,path,reports)/$::tdb::params(env,design,name).tcon_automation
+   foreach file_scon [glob -nocomplain ${violators_report_SCON}*] {
+      redirect /dev/null {catch {util::exec rm -rf $file_scon}}
+   }
+   # ${violators_report_SCON}.${global_v_scenario}.rpt
+   set output_report          $::tdb::params(env,path,reports)/$::tdb::params(env,design,name).tcon_automation.csv
+   set output_stcl            $::tdb::params(env,path,scripts_flow)/$::tdb::params(env,design,name).tcon_automation.$::tdb::params(env,flow,task).tcl
+   set input_stcl             $::tdb::params(env,path,scripts_build)/$::tdb::params(env,design,name).tcon_automation.$::tdb::params(env,flow,task).tcl
+   set local_tcon_script      $::tdb::params(env,path,scripts_build)/$::tdb::params(env,design,name).tcon.tcl
+   set output_log             $::tdb::params(env,path,logs)/$::tdb::params(env,design,name).tcon_automation.log
+   set port_type_log          $::tdb::params(env,path,logs)/$::tdb::params(env,design,name).interface_port_type.log
+
+   array unset argArray
+   parse_proc_arguments -args $args argArray
+
+   #---> Input
+   set input_tcon_INTER 0.5
+   if { [ info exists argArray(-input_tcon_INTER) ] } {
+      set input_tcon_INTER $argArray(-input_tcon_INTER)
+   }
+
+   set input_tcon_INTRA 0.4
+   if { [ info exists argArray(-input_tcon_INTRA) ] } {
+      set input_tcon_INTRA $argArray(-input_tcon_INTRA)
+   }
+
+   #---> Output
+   set output_tcon_INTER 0.5
+   if { [ info exists argArray(-output_tcon_INTER) ] } {
+      set output_tcon_INTER $argArray(-output_tcon_INTER)
+   }
+
+   set output_tcon_INTRA 0.4
+   if { [ info exists argArray(-output_tcon_INTRA) ] } {
+      set output_tcon_INTRA $argArray(-output_tcon_INTRA)
+   }
+
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) TCON_AUTOMATION_VERSION: 24ww08.5.3"
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "   Visit http://goto/tcons    "
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) TCON Values (%)"
+   
+   puts "Input  TCON for INTER (rise&fall)   $input_tcon_INTER"
+   puts "Input  TCON for INTRA (rise&fall)   $input_tcon_INTRA"
+   puts "Output TCON for INTER (rise&fall)   $output_tcon_INTER"
+   puts "Output TCON for INTRA (rise&fall)   $output_tcon_INTRA"
+
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Checking for inter section ports"
+   #---> tdb_path_type attribute can't be used for identifying inter section & intra section ports, its values don't seem to be correct.
+   #---> New Approach is based on Section Level ports (pin ring) taken from Full Chip Unit BlackBox Netlist.
+   #---> All pins were dumped out per partition, if a given partition has a script in:
+   #---> /p/$::env(PROJ_NAME)/build/scripts/tcon_automation/$::env(PROJ_RTL_MODEL)/
+   #---> /p/$::env(PROJ_NAME)/$::env(SUB_PROJ_NAME)/build/scripts/tcon_automation/
+   #---> then, this partition has inter section connectivity
+   #---> Remaining ports will be hanldled as intra section ports.
+
+   if { [file exists /p/$::env(PROJ_NAME)/$::env(SUB_PROJ_NAME)/build/scripts/tcon_automation/ ]} {
+      set install_area /p/$::env(PROJ_NAME)/$::env(SUB_PROJ_NAME)/build/scripts/tcon_automation/
+   } elseif { [file exists /p/$::env(PROJ_NAME)/build/scripts/tcon_automation/ ] } {
+      set install_area /p/$::env(PROJ_NAME)/build/scripts/tcon_automation/
+   } else {
+      set install_area NULL
+      core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) Install Area hasn't been setup for $::env(PROJ_NAME)/$::env(SUB_PROJ_NAME) - Contact bdinarte"
+      puts "Proceeding with script, handling all ports as intra section ports."
+   }
+
+   set PinRingFile [glob -nocomplain ${install_area}/$::env(PROJ_RTL_MODEL)/$::tdb::params(env,design,name).PinRingPartition*]
+   set PinRingArea ${install_area}/$::env(PROJ_RTL_MODEL)
+
+   if { [file exists $install_area] } {
+      if { ![file exists $PinRingArea ] } {
+         core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) Missing Pin Ring File Repo for RTLModel $::env(PROJ_RTL_MODEL) - Contact bdinarte"
+         puts "Proceeding with script, handling all ports as intra section ports."
+      }
+   }
+   set dont_touch_ports    [get_ports -quiet {*gctunit*}]
+   set clock_source_ports  [get_ports -quiet [filter_collection [get_attribute [get_clocks] sources] "object_class == port"]]
+   if { [sizeof_collection $clock_source_ports] } {
+      set dont_touch_ports [append_to_collection dont_touch_ports $clock_source_ports]
+      set clock_source_portsFO [get_ports -quiet [all_fanout -from [get_ports $dont_touch_ports] -endpoints_only]]
+      if { [sizeof_collection $clock_source_portsFO] } {
+         set dont_touch_ports [append_to_collection dont_touch_ports $clock_source_portsFO]
+      }
+   }
+
+   #---> Default ports
+   set inter_section_ports {}
+   if { [sizeof_collection $dont_touch_ports] } {
+      set intra_section_ports [remove_from_collection [get_ports] $dont_touch_ports ]
+      puts "Excluding following clock ports: [util::echo_objects $dont_touch_ports]"
+   } else {
+      set intra_section_ports [get_ports]
+   }  
+   #---> Do we have a pin ring file for the partition under analysis?
+   if { [ file exists $PinRingFile ] } {
+      core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Found inter section ports stcl: $PinRingFile"
+      #---> Did we have issues sourcing it?
+      if { [catch { source $PinRingFile }] } {
+         core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) Found issues sourcing $PinRingFile - Contact bdinarte"
+         puts "Proceeding with script, handling all ports as intra section ports."
+      } else {
+         #---> Is the pin ring file being properly loaded? List PinHash identifies ports
+         if { ![info exists PinHash ] } {
+            core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) Couldn't find a list of interface ports in $PinRingFile - Contact bdinarte"
+            puts "Proceeding with script, handling all ports as intra section ports."
+         } else {
+            set inter_section_ports_RAW [get_ports -quiet $PinHash]
+            set intra_section_ports_RAW [remove_from_collection [get_ports] $inter_section_ports_RAW ]
+            if { [sizeof_collection $dont_touch_ports] } {
+               core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Excluding [sizeof_collection $dont_touch_ports] *gctunit* and clock source ports"
+               set inter_section_ports [remove_from_collection $inter_section_ports_RAW $dont_touch_ports]
+               set intra_section_ports [remove_from_collection $intra_section_ports_RAW $dont_touch_ports]
+            } else {
+               set inter_section_ports $inter_section_ports_RAW
+               set intra_section_ports $intra_section_ports_RAW
+            }
+         }
+      }
+   } else {
+      if { [file exists $PinRingArea ] } {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Partition doesn't have inter section ports"
+         puts "Proceeding with script, handling all ports as intra section ports."
+      }
+      set inter_section_ports {}
+      if { [sizeof_collection $dont_touch_ports] } {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Excluding [sizeof_collection $dont_touch_ports] *gctunit* and clock source ports"
+         set intra_section_ports [remove_from_collection [get_ports] $dont_touch_ports ]
+      } else {
+         set intra_section_ports [get_ports]
+      }
+   } 
+
+   #---> Port Type support: interface_port_type
+   #interface_port_type =  inter_section     (connectivity between different sections)
+   #interface_port_type =  inter_partition   (connectivity bettwen partitions of same section)
+   #interface_port_type =  soc               (connectivity with ports at FC level)
+   set interface_port_type_file [glob -nocomplain ${install_area}/$::env(PROJ_RTL_MODEL)/$::tdb::params(env,design,name).interface_port_type*]
+   if { [ file exists $interface_port_type_file ] } {
+      core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Setting interface_port attribute based on : $interface_port_type_file"
+      catch { redirect $port_type_log { source -continue_on_error $interface_port_type_file } }
+      puts "   Logfile: $port_type_log"
+      puts "   Check ports in your design using: "
+      puts "      get_ports -filter \"interface_port_type=~inter_section\"   :: connectivity between different sections"
+      puts "      get_ports -filter \"interface_port_type=~inter_partition\" :: connectivity within same section"
+      puts "      get_ports -filter \"interface_port_type=~soc\"             :: connectivity with FC level ports"
+   }
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Breakdown for Ports"
+   #---> Intra Section Ports
+   puts "Intra Section Ports:             [sizeof_collection $intra_section_ports] out of [sizeof_collection [get_ports]]"
+   set intra_section_ports_IN    [get_ports -quiet $intra_section_ports -filter "direction=~in"]
+   set intra_section_ports_OUT   [get_ports -quiet $intra_section_ports -filter "direction=~out"]
+   set intra_section_ports_FT    [get_ports -quiet $intra_section_ports -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]
+   puts "Intra Section Ports (inputs) :   [sizeof_collection $intra_section_ports_IN]"
+   puts "Intra Section Ports (outputs):   [sizeof_collection $intra_section_ports_OUT]"
+   puts "Intra Section Ports (FTs):       [sizeof_collection $intra_section_ports_FT]"
+
+   #---> Inter Section Ports
+   puts "Inter Section Ports:             [sizeof_collection $inter_section_ports] out of [sizeof_collection [get_ports]]"
+   set inter_section_ports_IN    [get_ports -quiet $inter_section_ports -filter "direction=~in"]
+   set inter_section_ports_OUT   [get_ports -quiet $inter_section_ports -filter "direction=~out"]
+   set inter_section_ports_FT    [get_ports -quiet $inter_section_ports -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]
+   puts "Inter Section Ports (inputs) :   [sizeof_collection $inter_section_ports_IN]"
+   puts "Inter Section Ports (outputs):   [sizeof_collection $inter_section_ports_OUT]"
+   puts "Inter Section Ports (FTs):       [sizeof_collection $inter_section_ports_FT]"
+
+   #---> Generating Timing Traces before and after adding TCONS
+   variable RPT_CMD
+   set RPT_CMD "report_timing -nets -input_pins -nosplit"
+   if { [core::tool -icc2 -fc] } {
+      set RPT_CMD    "report_timing -nets -input_pins -nosplit -attributes -exception all -include_hierarchical_pins -path_type full_clock_expanded -physical -scenarios \[current_scenario\]"
+   }
+   if { [core::tool -dc] } {
+      set RPT_CMD    "report_timing -nets -input_pins -nosplit -attributes                                           -path_type full_clock_expanded -physical -scenarios \[current_scenario\]"
+   }
+
+   if { [ info exists argArray(-check_only) ] } { 
+      return
+   }
+
+   #---------------------------
+   #---> Recycling tcon files from previous runs for avoiding TPT issues
+   if { [ file exists $input_stcl ] } {
+      core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Skipping full TCON_Automation flow and sourcing existing file: $input_stcl"
+      puts "Sourcing: $input_stcl"
+      redirect $output_log { source -continue_on_error -echo -verbose $input_stcl }
+      catch { set filePointer [open $output_log r] }
+      set fileContent [read -nonewline $filePointer]
+      close $filePointer
+      set list_fileContent [split $fileContent "\n"]
+      puts "Found [llength [lsearch -all -regexp $list_fileContent {error:|Error:|ERROR:}]] errors in logfile: $output_log"
+      puts "Done Sourcing: $input_stcl"
+      #---------------------------
+      #---> local tcon overrides
+      if { [file exists $local_tcon_script] } {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Sourcing LOCAL tcon overrides: $local_tcon_script"
+
+         puts "Sourcing: $local_tcon_script"
+         source -continue_on_error -echo -verbose $local_tcon_script
+         puts "Done Sourcing: $local_tcon_script"
+      } else {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) No LOCAL tcon overrides Found: $local_tcon_script"
+      }
+
+      puts "Follow this template for manual TCON adjusments: /p/synergie/release/sd_toolkit/staging/latest/tcon_automation/Template.tcon.tcl"
+
+      set snapshot [expr ( [ clock seconds ] - $zero_time_loop )]
+      set TPT [get_time_human_format $snapshot]
+      core::msg -prefix TCON_AUTOMATION -type INFO -string "Done! Total TPT: $TPT"
+      return
+   }
+
+   #---> Apply only for Partition ports
+   # [core::query -is_node partition]
+   if { [core::query -is_node partition] } {
+
+      #---------------------------
+      #---> MCMM
+     
+      if { [core::tool -icc2 -fc] } { 
+         set current_scen     [get_object_name [current_scenario]]
+         set list_scenarios   [get_object_name [get_scenarios -filter setup]]
+      } else {
+         set current_scen [current_scenario]
+         set list_scenarios   [get_scenarios]
+      }
+      foreach v_scenario $list_scenarios {
+
+            current_scenario $v_scenario
+            core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Checking exceptions and Applying tcons for Scenario $v_scenario"
+            variable global_v_scenario
+            set global_v_scenario $v_scenario
+
+            #---------------------------
+            #---> Default Clock
+            set major_clock [get_major_clock]
+            puts "\t([date]) MajorClock is $major_clock (default clock)"
+            #---------------------------
+            #---> Inter Section Ports
+            #---> inputs
+            puts "\t([date]) Input InterSection Ports."
+            apply_custom_tcon -ports [get_object_name [get_ports -quiet $inter_section_ports -filter "direction=~in"]]  -tcon_perc $input_tcon_INTER -type INTER -default_clock $major_clock
+
+            #---> outputs
+            puts "\t([date]) Output InterSection Ports."
+            apply_custom_tcon -ports [get_object_name [get_ports -quiet $inter_section_ports -filter "direction=~out"]] -tcon_perc $output_tcon_INTER -type INTER -default_clock $major_clock
+
+            #---------------------------
+            #---> Intra Section Ports
+            #---> inputs
+            puts "\t([date]) Input IntraSection Ports."
+            apply_custom_tcon -ports [get_object_name [get_ports -quiet $intra_section_ports -filter "direction=~in"]]  -tcon_perc $input_tcon_INTRA -type INTRA -default_clock $major_clock
+            #---> outputs
+            puts "\t([date]) Input IntraSection Ports."
+            apply_custom_tcon -ports [get_object_name [get_ports -quiet $intra_section_ports -filter "direction=~out"]] -tcon_perc $output_tcon_INTRA -type INTRA -default_clock $major_clock
+
+      }
+      current_scenario $current_scen
+ 
+      #---------------------------
+      #---> Port Status
+      if { [llength $port_status_hash ] } {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Writing tcon Summary: $output_report"
+         
+         set fileId [open $output_report w]
+         foreach data $port_status_hash {
+            puts $fileId [join $data ","]
+         }
+         close $fileId
+      } else {
+         core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) No ports found for generating Summary"
+      }
+
+      #---------------------------
+      #---> automated tcon overrides
+      if { [llength $port_tcon_list ] } {
+         set output_stcl $::tdb::params(env,path,scripts_flow)/$::tdb::params(env,design,name).tcon_automation.$::tdb::params(env,flow,task).tcl
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Sourcing AUTOMATED tcon overrides: $output_stcl"
+         
+         set fileId [open $output_stcl w]
+         foreach data $port_tcon_list {
+            #DC: removing -scenarios $v_scenario
+            if { [core::tool -dc] } {
+               puts $fileId [regsub -all {(\S+)\s-scenarios\s\S+\s(; #.*)} $data {\1 \2}]
+            } else {
+               puts $fileId $data
+            }
+         }
+         close $fileId
+         set output_log $::tdb::params(env,path,logs)/$::tdb::params(env,design,name).tcon_automation.log
+         puts "Sourcing: $output_stcl"
+         redirect $output_log { source -continue_on_error -echo -verbose $output_stcl }
+         catch { set filePointer [open $output_log r] }
+         set fileContent [read -nonewline $filePointer]
+         close $filePointer
+         set list_fileContent [split $fileContent "\n"]
+         puts "Found [llength [lsearch -all -regexp $list_fileContent {error:|Error:|ERROR:}]] errors in logfile: $output_log"
+         puts "Done Sourcing: $output_stcl"
+
+         #---------------------------
+         #---> internal stats
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Summary"
+         set total_ports               [sizeof_collection [get_ports]]
+         set total_tcon_ports          [llength [lsort -unique $tcon_ports]]
+         set total_scon_ports          [llength [lsort -unique $scon_ports]]
+         set total_dropped_ports       [llength [lsort -unique $dropped_ports]]
+         set total_defaulted_ports     [llength [lsort -unique $defaulted_ports]]
+         set total_dont_touch_ports    [sizeof_collection $dont_touch_ports]
+
+         set perc_tcon_ports         [format "%.2f" [expr [expr [expr double ($total_tcon_ports)]            / [expr double ($total_ports)]] * 100 ]]    
+         set perc_scon_ports         [format "%.2f" [expr [expr [expr double ($total_scon_ports)]            / [expr double ($total_ports)]] * 100 ]]
+         set perc_dropped_ports      [format "%.2f" [expr [expr [expr double ($total_dropped_ports)]         / [expr double ($total_ports)]] * 100 ]]
+         set perc_defaulted_ports    [format "%.2f" [expr [expr [expr double ($total_defaulted_ports)]    / [expr double ($total_ports)]] * 100 ]]
+         set perc_dont_touch_ports   [format "%.2f" [expr [expr [expr double ($total_dont_touch_ports)]      / [expr double ($total_ports)]] * 100 ]]
+
+
+         set total_dont_touch_ports_FT       [llength [lsort -unique [get_object_name [get_ports -quiet $dont_touch_ports    -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]]]]
+         set total_tcon_ports_FT             [llength [lsort -unique [get_object_name [get_ports -quiet $tcon_ports          -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]]]]
+         set total_scon_ports_FT             [llength [lsort -unique [get_object_name [get_ports -quiet $scon_ports          -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]]]]
+         set total_dropped_ports_FT          [llength [lsort -unique [get_object_name [get_ports -quiet $dropped_ports       -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]]]]
+         set total_defaulted_ports_FT        [llength [lsort -unique [get_object_name [get_ports -quiet $defaulted_ports     -filter "full_name=~*FEEDTHRU* || full_name=~*OVERLAP*"]]]]
+
+         set formatStr {%-30s%-15s%-10s%-10s%-15s%-15s}
+         puts [ format $formatStr "TCON_AUTOMATION_STAT-Ports" "Dont_touch"                  "Dropped"                  "SCONs"                 "Defaulted"                   "TCONs" ]
+         puts [ format $formatStr "TCON_AUTOMATION_STAT-Count" "$total_dont_touch_ports"     "$total_dropped_ports"     "$total_scon_ports"     "$total_defaulted_ports"      "$total_tcon_ports"]
+         puts [ format $formatStr "TCON_AUTOMATION_STAT-Perct" "$perc_dont_touch_ports%"     "$perc_dropped_ports%"     "$perc_scon_ports%"     "$perc_defaulted_ports%"      "$perc_tcon_ports%"]
+         puts [ format $formatStr "TCON_AUTOMATION_STAT-FTs"   "$total_dont_touch_ports_FT"  "$total_dropped_ports_FT"  "$total_scon_ports_FT"  "$total_defaulted_ports_FT"   "$total_tcon_ports_FT"]
+
+         puts "Dont_touch     : Ports defined as clock sources                (Skipped by the script)"
+         puts "Dropped        : Ports' clock  doesn't have period attribute   (Skipped by the script)"
+         puts "SCONs          : Ports with SCONs already applied              (Skipped by the script)"
+         puts "Defaulted      : Ports without ref_clocks attribute            (Addressed by script using $major_clock*)"
+         puts "TCONs          : Ports getting custom tcons                    (Addressed by script)"
+
+      } else {
+         core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) No ports found for generating TCON override stcl"
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Running default_tcon_budgetting"
+         catch { default_tcon_budgetting }
+      }
+
+      #---------------------------
+      #---> local tcon overrides
+      set local_tcon_script $::tdb::params(env,path,scripts_build)/$::tdb::params(env,design,name).tcon.tcl
+      if { [file exists $local_tcon_script] } {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Sourcing LOCAL tcon overrides: $local_tcon_script"
+         
+         puts "Sourcing: $local_tcon_script"
+         source -continue_on_error -echo -verbose $local_tcon_script
+         puts "Done Sourcing: $local_tcon_script"
+      } else {
+         core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) No LOCAL tcon overrides Found: $local_tcon_script"
+         
+      }
+   } else {
+      core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Utility Runs only at Partition Level"
+   }
+   set snapshot [expr ( [ clock seconds ] - $zero_time_loop )]
+   set TPT [get_time_human_format $snapshot]
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "Done! Total TPT: $TPT"
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "   Visit http://goto/tcons    "
+}
+
+define_proc_attributes PROC_TCON \
+-info "" -define_args {
+{-input_tcon_INTER    input_tcon_INTER ""    float optional}
+{-output_tcon_INTER   output_tcon_INTER ""   float optional}
+{-input_tcon_INTRA    input_tcon_INTRA ""    float optional}
+{-output_tcon_INTRA   output_tcon_INTRA ""   float optional}
+{-check_only "Check only and report port types" "" boolean optional}
+}
+
+
+
+#-------------------------------------------------------------------------------
+# Given a list of ports, assign custom TCON
+#-------------------------------------------------------------------------------
+proc apply_custom_tcon { args } {
+
+   array unset argArray
+   parse_proc_arguments -args $args argArray
+
+   variable port_status_hash
+   variable port_tcon_list
+
+   variable tcon_ports
+   variable scon_ports 
+   variable dropped_ports
+   variable defaulted_ports
+
+   variable zero_time_loop
+   variable global_v_scenario
+   variable violators_report_SCON
+   variable RPT_CMD
+
+   set tcon_perc_value $argArray(-tcon_perc)
+   set port_tag  $argArray(-type)
+
+   if { ![sizeof_collection [get_ports -quiet $argArray(-ports)] ] } {
+      echo "INFO: [sizeof_collection [get_ports -quiet $argArray(-ports)] ] $port_tag Ports Found" 
+      return
+   }
+
+   #---> Getting all timing_paths in 1 shot
+   set max_paths [expr [sizeof_collection [get_ports $argArray(-ports)] ] * 1000]
+   if { [core::tool -icc2 -fc] } {
+      redirect /dev/null { set all_GTPs [get_timing_paths -through [get_ports $argArray(-ports)] -scenarios $global_v_scenario   -max_paths $max_paths] }
+   } else {
+      redirect /dev/null { set all_GTPs [get_timing_paths -through [get_ports $argArray(-ports)]                                 -max_paths $max_paths] }
+   }
+   #---> Let's check if a given port has a MCP and let's store this is an array
+   array unset SCON_PORT_HASH
+   array set SCON_PORT_HASH [check_for_mcp_or_xbuf -port_collection $all_GTPs]           
+
+   #---> Looping thru ports
+   foreach myport [get_object_name [get_ports -quiet $argArray(-ports) ]] {
+
+      set direction [get_attribute [get_port $myport] direction ]
+
+      if { [regexp {in} $direction] } {
+         set tcon_CMD   set_input_delay
+      } else {
+         set tcon_CMD   set_output_delay
+      }
+
+      #------------------------------------------------
+      #--->Case 1: SCON Found
+
+      if { [info exists SCON_PORT_HASH($myport) ] } {
+         lappend port_status_hash [list $global_v_scenario ${port_tag}-SECTION $myport $direction true false "Existing MCP"]
+         lappend scon_ports $myport
+      } else {
+      #------------------------------------------------
+      #--->Case 2:
+         if { [core::tool -dc] } {
+            set list_clocks [get_attribute -quiet [get_port $myport] ref_clocks]
+         } else {
+            set list_clocks [get_object_name [get_attribute -quiet [get_port $myport] ref_clocks]]
+         }
+         foreach v_clock $list_clocks {
+            set period [get_attribute -quiet [get_clock $v_clock] period]
+            if { ![regexp {spine} $v_clock] } {
+               set spine_clock [get_object_name [get_clocks -filter "!is_virtual&&full_name=~${v_clock}*"]]
+            }
+      #------------------------------------------------
+      #--->Case 2.1: non-SCON Path
+            if { $period ne "" } {
+               lappend port_status_hash [list $global_v_scenario ${port_tag}-SECTION $myport $direction false true "TCON applied for $list_clocks"]
+               lappend port_tcon_list "$tcon_CMD -max \[ expr $period * $tcon_perc_value \] $myport -clock $v_clock -scenarios $global_v_scenario ; # $global_v_scenario -> $period ($port_tag)"
+               lappend tcon_ports $myport
+      #------------------------------------------------
+      #--->Case 2.2: Dropped Port. No Period found
+            } else {
+               lappend port_status_hash [list $global_v_scenario ${port_tag}-SECTION $myport $direction false false "Dropped due to missing Period attribute for $v_clock"]
+               lappend dropped_ports $myport
+            }
+         }
+      #------------------------------------------------
+      #--->Case 3:
+         if { $list_clocks eq "" } {
+            lappend defaulted_ports $myport
+            set v_clock $argArray(-default_clock)
+      #--->Case 3.1: Defaulted TCON
+            if { ![regexp {NOTFOUND} $v_clock] } {
+               set period  [get_attribute -quiet [get_clock $v_clock] period]
+               lappend port_status_hash [list $global_v_scenario ${port_tag}-SECTION $myport $direction false true "Defaulted TCON ($v_clock)"]
+               lappend port_tcon_list "$tcon_CMD -max \[ expr $period * $tcon_perc_value \] $myport -clock $v_clock -scenarios $global_v_scenario ; # $global_v_scenario -> $period ($port_tag) (defaulted)"
+               lappend port_tcon_list "set_attribute \[get_port $myport\] ref_clocks $v_clock"
+      #--->Case 3.2: Dropped Port. No default clock found
+            } else {
+               lappend port_status_hash [list $global_v_scenario ${port_tag}-SECTION $myport $direction false false "Dropped due to missing default clock"]
+               lappend dropped_ports $myport
+            }
+         }
+      }
+   }
+   set TPT_temp [get_time_human_format [expr ( [ clock seconds ] - $zero_time_loop )]]
+   echo "        TPT (d:h:m:s) : $TPT_temp"
+}
+define_proc_attributes apply_custom_tcon \
+-info "" -define_args {
+{-tcon_perc tcon_perc "" float required}
+{-ports     ports "" string required}
+{-type      type  "" string required}
+{-default_clock   type  "" string required}
+}
+
+#-------------------------------------------------------------------------------
+# Given a port, check if this port has a scon.
+# If endpoint_clock_close_edge_value or endpoint_clock_open_edge_value are greater than endpoint_clock_period, then we have added a MCP or max_delay (no need to check for false_paths).
+# get_exceptions, report_exceptions, all_exceptions fall short here, and attributes such delay_exceptions only exist in PrimeTime
+#-------------------------------------------------------------------------------
+proc check_for_mcp_or_xbuf { args } {
+
+   array unset argArray
+   parse_proc_arguments -args $args argArray
+   array unset SCON_HASH
+   set all_GTPs $argArray(-port_collection)
+
+   variable global_v_scenario
+   variable violators_report_SCON
+   variable RPT_CMD
+
+   foreach_in_collection GTP $all_GTPs {
+
+      #---> startpoint/endpoint
+      set startpoint       [get_object_name [get_attribute $GTP startpoint]]
+      set endpoint         [get_object_name [get_attribute $GTP endpoint]]
+      set slack            [get_attribute $GTP slack]
+      #---> Period
+       set RPT_CMD_DB "$RPT_CMD -from $startpoint -to $endpoint"
+      if { [core::tool -dc] } { 
+         set endpoint_clock_period           [get_attribute [get_clock [get_attribute $GTP endpoint_clock]] period]
+      } else {
+         set endpoint_clock_period           [get_attribute $GTP endpoint_clock_period]
+      }
+
+      #---> close_edge & open_edge
+      set endpoint_clock_close_edge_value [get_attribute $GTP endpoint_clock_close_edge_value]
+      set endpoint_clock_open_edge_value  [get_attribute $GTP endpoint_clock_open_edge_value]
+
+      #---> Populate the Array
+      if { $endpoint_clock_close_edge_value > $endpoint_clock_period || $endpoint_clock_open_edge_value > $endpoint_clock_period } {
+         set SCON_HASH($startpoint) 1 
+         set SCON_HASH($endpoint)   1 
+         set violators_report_SCON_scenario ${violators_report_SCON}.${global_v_scenario}.rpt
+         catch { redirect $violators_report_SCON_scenario -append {echo "SCON,$startpoint,$endpoint,$slack,$endpoint_clock_close_edge_value,$endpoint_clock_open_edge_value,$endpoint_clock_period"}}
+         catch { redirect $violators_report_SCON_scenario -append { [eval $RPT_CMD_DB ] } }
+      }
+   }
+   return [array get SCON_HASH]
+}
+define_proc_attributes check_for_mcp_or_xbuf \
+-info "" -define_args {
+{-port_collection ports "" string required }
+}
+
+
+#-------------------------------------------------------------------------------
+# Default TCON Budgetting
+#-------------------------------------------------------------------------------
+proc default_tcon_budgetting {} {
+
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Start with Default TCON Budgetting"
+
+   #---------------------------
+   #---> Default Clock
+   set major_clock [get_major_clock]
+   puts "\t([date]) MajorClock is $major_clock"
+
+   if { [core::tool -dc -fc] } {
+      set valb2 [expr [get_attribute [get_clocks $major_clock] period] * 0.5]
+      puts "Applying 50% Tcons for all IOs in current_scenario $valb2 (rise & fall)"
+      set_input_delay   -clock $major_clock -max  $valb2   [get_ports [all_inputs]] 
+      set_output_delay  -clock $major_clock -max  $valb2   [get_ports [all_outputs]] 
+      set_attribute [get_port [all_outputs] ]  ref_clocks $major_clock
+      set_attribute [get_port [all_inputs]  ]  ref_clocks $major_clock
+   }
+   if { [core::tool -icc2 -fc ] } {
+      set orig_scenario [current_scenario]
+      foreach_in_collection c [get_scenarios *max*] {
+         current_scenario $c
+         set valb2 [expr [get_attribute [get_clocks $major_clock] period] * 0.5]
+         puts "Applying 50% Tcons for all IOs in [get_object_name $c] $valb2 (rise & fall)"
+         set_input_delay   -clock $major_clock -max  $valb2 [get_ports [all_inputs]] 
+         set_output_delay  -clock $major_clock -max  $valb2 [get_ports [all_outputs]] 
+         set_attribute [get_port [all_outputs]] ref_clocks $major_clock
+         set_attribute [get_port [all_inputs]] ref_clocks $major_clock
+      }
+      current_scenario $orig_scenario 
+   }
+
+   if { [core::tool -pt ] } {
+      set valb2 [expr [get_attribute [get_clocks $major_clock] period] * 0.5]
+
+      puts "Applying 50% Tcons for all IOs in tttt_max_vmid $valb2 (rise & fall)"
+      set_input_delay   -clock $major_clock -max  $valb2 [get_ports [all_inputs]] 
+      set_output_delay  -clock $major_clock -max  $valb2 [get_ports [all_outputs]] 
+   }
+   core::msg -prefix TCON_AUTOMATION -type INFO -string "([date]) Done with Default TCON Budgetting"
+}
+
+#-------------------------------------------------------------------------------
+# Default TCON Budgetting
+#-------------------------------------------------------------------------------
+proc get_major_clock {} {
+   #---> Getting the major clock
+   set list_clock_sinks {} 
+   set major_clock      {}
+   array unset ALL_CLOCKS
+   set all_defined_clocks [get_object_name [get_clocks -filter "defined(sources) && defined(period)"]]
+   foreach clk $all_defined_clocks {
+      set ALL_CLOCKS($clk) 0
+   }
+   set scan_clocks {}
+   if { [sizeof_collection [get_clocks -quiet -filter "scanclk==1"]] } {
+      set scan_clocks [get_clocks -filter "scanclk==1"]
+   }
+   foreach_in_collection clk_pin [all_registers -clock_pins] {
+      set pin_clocks [get_attribute $clk_pin clocks]
+      if { [sizeof_collection [get_clocks -quiet $scan_clocks]] } {
+         set list_clocks [remove_from_collection $pin_clocks $scan_clocks]
+      } else {
+         set list_clocks $pin_clocks
+      }
+      foreach func_clk [get_object_name $list_clocks] {
+         incr ALL_CLOCKS($func_clk)
+      }
+   }
+   foreach v_clk [array names ALL_CLOCKS] {
+      lappend list_clock_sinks [list $v_clk $ALL_CLOCKS($v_clk) ]
+   }
+   #---> Option #1: Major clock
+   if { [llength $list_clock_sinks] } {
+      echo "Clocks: [lsort -real -decreasing -index 1 $list_clock_sinks]"
+      set major_clock [lindex [lsort -real -decreasing -index 1 $list_clock_sinks] 0 0]
+   #---> Option #2: *1xclk* clock
+   } else {
+      set major_clock [lindex [get_object_name [filter_collection [get_clocks -filter "defined(sources) && defined(period)"] "full_name=~*1xclk*"]] 0] 
+   }
+   #---> Option 1 and Option 2 have failed, then we report an invalid clock!
+   if { [sizeof_collection [get_clock -quiet $major_clock]] } {
+      return $major_clock
+   } else {
+      core::msg -prefix TCON_AUTOMATION -type ERROR -string "([date]) Not able to find a major clock for default cases, this will lead to unconstrained ports. Please follow up with bdinarte."
+      return "NOTFOUND"
+   }
+}
+
+#-------------------------------------------------------------------------------
+# Converting seconds to human readable format: hours:minutes:seconds
+#-------------------------------------------------------------------------------
+proc get_time_human_format {total_seconds} {
+  set seconds_in_day [expr 24 * 3600.0]
+  set num_days_f [expr floor($total_seconds / $seconds_in_day)]
+  set partial_day_f [expr ($total_seconds / $seconds_in_day) - $num_days_f]
+  set num_days [expr int($num_days_f)]
+  set partial_day [expr int($partial_day_f * $seconds_in_day)]
+  set hms [clock format $partial_day -format %T -gmt true]
+  set dhms [format "%02d:%s" $num_days $hms]
+  #return "$hms"
+  return "$dhms"
+}
+
+
+#-------------------------------------------------------------------------------
+# INDNJC
+#-------------------------------------------------------------------------------

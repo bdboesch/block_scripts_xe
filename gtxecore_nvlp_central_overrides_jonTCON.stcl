@@ -1,0 +1,112 @@
+
+##Central TCON Methodology
+set ::fcsyn::params(tcons,section_overrides) /nfs/site/disks/nvlp_infra_env_01/build/scripts/XECORE_CENTRAL/gtxecore_section_tcon.overrides.stcl_ww33
+
+##JKV if {[regexp "ski" $::fcsyn::params(env,design,label)]} {
+##JKV   set ::fcsyn::params(tcons,section_overrides) /nfs/site/disks/nvlp_infra_env_01/build/scripts/XECORE_CENTRAL/gtxecore_section_tcon.overrides.stcl_ww33
+##JKV }
+
+##JKV clock::params nodop_rtl_clk_src_name_regexp {(cuclk)_raw}
+
+##QORSUM
+source /p/mtlsd/build/scripts/qorsum.MTL/PROC_qorsum.tcl 
+setenv QORSUM_EMAIL_USERS [sh whoami]
+
+###### 
+set ::fcsyn::params(programmable_signals) {euID_raw* tdl_cache_mode_ss_* dft_clock_fr_ssm icunitID *xecuID* dft_clock_fr_xecore_prev* bisr_clk_fr_xecore_prev_xecore* sc_chkn_* sc_pl_chkn_* dft_clock_fr_gt*par* fsta_dfxact_afd ijtag_sel_* *trim_fuses.* tdl_*chkn_* bus_fr_* ijtag* *pwrgood* gt_sai_strap* cdt_idvglobals.* cdt_iovglobals.* cp_cg3ddis* *rstb* compute_powergood* compmastercp_* compmaster_* pma2gcp_corerst* compute_chiplet_id_raw* compute_cprst_b* gdt_broadcast* *SliceID* LSCBankID_raw vdmodi_gtlscbank_output* lsc_l1bank_ctrl_ecc_* *sliceID* dt_latchopen* *rst_b* dt_latchclosed_b* cp_te_ugt* cp_cg* cp_ramcg* }
+############################################################
+#### scan over-rides from Shubham
+############################################################
+##JKV     dft::params scanmode_tie_1_signal                  {*scanwrap*unit1/*ctech_scan_cp_l1ugt* *scanwrap*unit1/*ctech_dt_l2ugt* *scanwrap*unit1/*ctech_dt_l2ugt_dftc* *scanwrap*unit1/*ctech_dt_scanmode* *scanwrap*unit1/*ctech_dt_cfglatchclosed_b* *scanwrap*unit1/*ctech_dt_latchclosed_b* *scanwrap*unit1/*ctech_dt_latchopen* *scanwrap*unit1/*ctech_scan_cp_tstrstmuxsel* *scanwrap*unit1/*ctech_scanshiften_dftc* *scanwrap*unit1/*ctech_scanparisolshiften_dftc* *scanwrap*unit1/*ctech_scanshiften_SLOS_en_dftc* *scanwrap*unit1/*ctech_scan_cp_tstrst_b* *i_parctlunit1/fscan_isol_lat_ctrl *i_parctlunit1/fscan_ram_awt_mode *i_parctlunit1/i_fscan_ram_lv_tm/i_ctech_lib_buf* *scandfx*unit1/*burnin*/i_ctech_fscan_state* *scandfx*unit*/burnin*/i_ctech_fscan_mode_or* *scanwrap*unit1/*ctech_scan_ram_scanen*/o *scanwrap*unit1/*ctech_scan_ram_lv_tm*/o *scanwrap*unit1/*ctech_scan_ram_bypsel*/o *scanwrap*unit1/*ctech_scan_ram_scanen*/o *scanwrap*unit1/*ctech_scan_ram_lv_tm*/o *scanwrap*unit1/*ctech_scan_ram_bypsel*/o *scanwrap*unit1/*ctech_acm_hip_scan_enable*/o dpma_vcc_inf_com_isolation_en_b ijtag_sel* *_tessent_tdr_sri_ctrl_inst/ltest_en}
+##JKV     dft::params scanmode_tie_0_signal                  {*i_parctlunit1/fscan_clkstop_mode ijtag_reset *i_ucc_ctl/ij_ucc_mode[*] *scanwrap*unit1/*ctech_dt_ramdftoen*/o *i_parctlunit1/fscan_ram_awt_ren *i_parctlunit1/fscan_ram_awt_wen *i_parctlunit1/fscan_ram_bypsel *i_parctlunit1/fscan_ram_init_val *i_parctlunit1/fscan_ram_odis_b *i_parctlunit1/fscan_ram_rddis_b *i_parctlunit1/fscan_ram_wrdis_b *i_parctlunit1/fscan_ret_ctrl ijtag_reset_fr* *scanctrl*unit1/i_bictlunit1/i_bi_mode*tdr_out_reg*[0] *scanctrl*unit1/i_parctlunit1/i_fscan_mode_state_disable*tdr_out_reg*[0] *scanwrap*unit1/*ctech_scan_ram_odis*/o *scanwrap*unit1/*ctech_scan_ram_odis*/o *scanwrap*unit1/*ctech_dt_fscan_clkgenctrl*}
+##JKV 
+##JKV source /nfs/site/disks/tfm_static_rls_basic_005/jhonagai/my_scripts/nonscan_report_update_for_soc_new_version.tcl 
+##JKV 
+
+
+proc ::block::exceptions {} {
+##    dft::_msg INFO "Applying scan constraints"
+##    if {![info exists common::params(mbist_sdc_dir)]} {
+##        echo "SDC dir not specified, using central SDC files ===>"
+##        set common::params(mbist_sdc_dir) "/nfs/site/disks/cls_x4_xe3ip_infra_env_01/xe3ip/model/build/xe3iphpg10x6_V1_ww11p2/constraints/central_sdc_ww27/"
+##        echo "$common::params(mbist_sdc_dir)"
+##    } else {
+##        echo "SDC dir pre-specified, using SDC files from ===>"
+##        echo "$common::params(mbist_sdc_dir)"
+##    }
+    if {[core::tool -fc]} {
+      set pulse_clk_pins [get_pins -q -of [get_cells -q -hier -filter is_hard_macro] -filter "full_name=~*/pulse_clk"]
+      set current_scen [current_scenario]
+      if {[sizeof_collection $pulse_clk_pins]>0} {
+        foreach sc [get_object_name [get_scenarios -filter setup]] {
+          current_scenario $sc
+          set pclks [get_clocks -q [get_object_name $pulse_clk_pins]]
+          if {[sizeof_collection $pclks]>0} {
+            puts "###ERROR!! ERROR!! Masking (MCP=2) ssn/jtag clocks to EBB pulse_clks for $sc"
+            set_multicycle_path -setup 2 -from [get_clocks -q "*jtag* *ssn*"] -to $pclks
+            set_multicycle_path -hold 1 -from [get_clocks -q "*jtag* *ssn*"] -to $pclks
+          }
+        }
+        current_scenario $current_scen
+      }
+    }
+
+    if {![core::tool -pt]} {
+       # Don't run this code during parfp task.
+       if { [core::query -task] != "dp/parfp" } {
+         # JCSIPPEL: Trying to hack feedx budgets so we get better runtimes AND IO FEEDX delays remain reasonable
+         echo "JCSIPPEL-INFO: Hacking Feedthrough budgets so we don't have to use max delays and feedthrough timing doesn't become horrible ...."
+
+         # Iterate over all scenarios
+         set curr_scen [current_scenario]
+         foreach_in_collection scen [get_scenarios] {
+            current_scenario $scen
+            echo "JCSIPPEL-INFO: Constraining feedthrough paths in scenario [get_object_name $scen] ...."
+
+            # False path feedx paths w/r/t all other clocks
+            set_false_path -from [filter_collection [all_clocks] name!=feedx_clk] -through [all_inputs] -to [all_outputs]
+
+            # Create feedx_clk, if needed
+            set name "feedx_clk"
+            if { [get_clocks -quiet $name] == "" } {
+               echo "JCSIPPEL-INFO: Creating clock feedx_clk to constrain feedx paths ...."
+               create_clock -name $name -period [get_attribute [get_clocks c1xclk_fakespine] period] -waveform "0 [expr 0.5*[get_attribute [get_clocks c1xclk_fakespine] period]]"
+               set_false_path -from [filter_collection [all_clocks] "name!=$name"] -to [get_clocks $name]
+               set_false_path -to [filter_collection [all_clocks] "name!=$name"] -from [get_clocks $name]
+            }
+
+            # Constrain IO with feedx_clk
+            set iports [remove_from_collection [all_inputs] [get_ports -quiet [get_attribute [all_clocks] sources]]]
+            set_input_delay  [expr 0.2*[get_attribute feedx_clk period]] -clock feedx_clk -add_delay $iports
+            set_output_delay [expr 0.2*[get_attribute feedx_clk period]] -clock feedx_clk -add_delay [all_outputs]
+
+            # Input Port driving cell, max_capacitance constraints, and loading constraints
+            set_driving_cell -lib_cell i0mbff000ab1n18x5 -from_pin a -input_transition_rise 30 -input_transition_fall 30 $iports
+            set_max_capacitance 15 $iports
+            set_load -pin_load 3 $iports
+            set_load -pin_load 20 [all_outputs]
+         }
+         current_scenario $curr_scen
+       }
+    } else {
+        puts "### Disable all I/O paths for PV"
+        set_false_path -through [get_ports]
+    }
+}
+
+ftopt::params enable,ftopt 0
+relay::params enable,autoopt 0
+rpd::params enable,rpd 0
+
+cts::params icg_conv_mode,1x all
+cts::params icg_conv_mode,2x all
+cts::params icg_conv_mode,3x all
+cts::params clock_gating_style icg
+
+
+###############################################
+
+######
+proc proj::tcon {} {
+  puts "### Tcons being handled in exceptions step"
+}
